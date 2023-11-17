@@ -1,0 +1,30 @@
+[package]
+name = "proxy-header"
+authors = ["Tibor Djurica Potpara"]
+description = "A library for parsing and serializing PROXY protocol headers"
+license = "MIT"
+repository = "https://github.com/tibordp/proxy-header"
+readme = "README.md"
+keywords = ["haproxy", "protocol", "proxy"]
+categories = ["network-programming"]
+version = "0.1.0"
+edition = "2021"
+
+[features]
+tokio = ["dep:tokio", "dep:pin-project-lite"]
+
+[dependencies]
+pin-project-lite = { version = "0.2", optional = true }
+tokio = { version = "1", features = ["io-util"], optional = true }
+
+[dev-dependencies]
+criterion = { version = "0.4", features = ["html_reports"] }
+tokio = { version = "1", features = ["full"] }
+
+[[bench]]
+name = "bench"
+harness = false
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
