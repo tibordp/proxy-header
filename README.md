@@ -1,5 +1,16 @@
 # proxy-header
 
+[![Crates.io][crates-badge]][crates-url]
+[![MIT licensed][mit-badge]][mit-url]
+[![Build Status][actions-badge]][actions-url]
+
+[crates-badge]: https://img.shields.io/crates/v/proxy-header.svg
+[crates-url]: https://crates.io/crates/proxy-header
+[mit-badge]: https://img.shields.io/badge/license-MIT-blue.svg
+[mit-url]: https://github.com/tibordp/proxy-header/blob/main/LICENSE
+[actions-badge]: https://github.com/tibordp/proxy-header/workflows/Rust/badge.svg
+[actions-url]: https://github.com/tibordp/proxy-header/actions?query=workflow%3ARust+branch%3Amain
+
 This crate provides a decoder and encoder for the
 [HAProxy PROXY protocol](https://www.haproxy.org/download/2.8/doc/proxy-protocol.txt),
 which is used to preserve original client connection information when proxying TCP
