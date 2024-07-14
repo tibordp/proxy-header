@@ -791,13 +791,28 @@ mod tests {
 
     #[test]
     fn test_parse_proxy_header_too_short() {
-        for case in [V1_TCPV4, V1_TCPV6, V2_TCPV4, V2_TCPV6, V1_UNKNOWN].iter() {
-            for i in 0..case.len() - 1 {
+        for case in [
+            V1_TCPV4,
+            V1_TCPV6,
+            V1_UNKNOWN,
+            V2_TCPV4,
+            V2_TCPV6,
+            V2_TCPV4_TLV,
+            V2_LOCAL,
+        ]
+        .iter()
+        {
+            for i in 0..case.len() {
                 assert!(matches!(
                     ProxyHeader::parse(&case[..i], Default::default()),
                     Err(Error::BufferTooShort)
                 ));
             }
+
+            assert!(matches!(
+                ProxyHeader::parse(case, Default::default()),
+                Ok(_)
+            ));
         }
     }
 
