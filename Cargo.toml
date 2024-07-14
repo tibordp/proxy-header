@@ -7,7 +7,7 @@ repository = "https://github.com/tibordp/proxy-header"
 readme = "README.md"
 keywords = ["haproxy", "protocol", "proxy"]
 categories = ["network-programming"]
-version = "0.1.0"
+version = "0.1.2"
 edition = "2021"
 
 [features]
