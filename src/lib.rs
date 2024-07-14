@@ -764,6 +764,8 @@ mod tests {
 
     use super::*;
 
+    const V1_UNKNOWN: &[u8] = b"PROXY UNKNOWN\r\n";
+
     const V1_TCPV4: &[u8] = b"PROXY TCP4 127.0.0.1 192.168.0.1 12345 443\r\n";
     const V1_TCPV6: &[u8] = b"PROXY TCP6 2001:db8::1 ::1 12345 443\r\n";
 
@@ -789,13 +791,28 @@ mod tests {
 
     #[test]
     fn test_parse_proxy_header_too_short() {
-        for case in [V1_TCPV4, V1_TCPV6, V2_TCPV4, V2_TCPV6].iter() {
-            for i in 0..case.len() - 1 {
+        for case in [
+            V1_TCPV4,
+            V1_TCPV6,
+            V1_UNKNOWN,
+            V2_TCPV4,
+            V2_TCPV6,
+            V2_TCPV4_TLV,
+            V2_LOCAL,
+        ]
+        .iter()
+        {
+            for i in 0..case.len() {
                 assert!(matches!(
                     ProxyHeader::parse(&case[..i], Default::default()),
                     Err(Error::BufferTooShort)
                 ));
             }
+
+            assert!(matches!(
+                ProxyHeader::parse(case, Default::default()),
+                Ok(_)
+            ));
         }
     }
 

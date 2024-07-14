@@ -57,7 +57,8 @@ fn parse_addrs<T: AddressFamily>(buf: &[u8], pos: &mut usize) -> Result<ProxiedA
 fn decode_inner(buf: &[u8]) -> Result<(ProxyHeader, usize), Error> {
     let mut pos = 0;
 
-    if buf.len() < GREETING.len() + 1 + 6 {
+    if buf.len() < b"PROXY UNKNOWN\r\n".len() {
+        // All other valid PROXY headers are longer than this.
         return Err(BufferTooShort);
     }
     if !buf.starts_with(GREETING) {
