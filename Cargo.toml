@@ -9,6 +9,7 @@ keywords = ["haproxy", "protocol", "proxy"]
 categories = ["network-programming"]
 version = "0.1.2"
 edition = "2021"
+rust-version = "1.66"
 
 [features]
 tokio = ["dep:tokio", "dep:pin-project-lite"]
