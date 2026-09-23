@@ -326,12 +326,13 @@ where
         me.io.poll_fill_buf(cx)
     }
 
-    fn consume(self: Pin<&mut Self>, amt: usize) {
+    fn consume(self: Pin<&mut Self>, mut amt: usize) {
         let me = self.project();
 
         if !me.remaining.is_empty() {
             let len = std::cmp::min(me.remaining.len(), amt);
             me.remaining.drain(..len);
+            amt -= len;
         }
 
         me.io.consume(amt);
@@ -430,11 +431,93 @@ where
 mod tests {
     use super::*;
 
-    use crate::{Protocol, ProxiedAddress, ProxyHeader};
+    use crate::{Protocol, ProxiedAddress, ProxyHeader, Tlv};
     use std::{
         io::Cursor,
         net::{Ipv4Addr, SocketAddr, SocketAddrV4},
     };
+
+    /// Payload long enough that some of it is always read along with the header
+    /// (header reads use a 256 byte buffer) and some of it is left in the inner stream.
+    const PAYLOAD_LEN: usize = 4000;
+
+    fn payload() -> Vec<u8> {
+        (0..PAYLOAD_LEN).map(|i| (i % 251) as u8).collect()
+    }
+
+    fn address() -> ProxiedAddress {
+        ProxiedAddress::stream(
+            "127.0.0.1:1234".parse().unwrap(),
+            "10.0.0.1:443".parse().unwrap(),
+        )
+    }
+
+    /// Returns (description, expected header, encoded header followed by payload)
+    fn cases() -> Vec<(&'static str, ProxyHeader<'static>, Vec<u8>)> {
+        let v4 = ProxyHeader::with_address(ProxiedAddress::stream(
+            "127.0.0.1:1234".parse().unwrap(),
+            "8.8.4.4:5678".parse().unwrap(),
+        ));
+        let v2_tlvs = ProxyHeader::with_tlvs(
+            Some(address()),
+            [
+                Tlv::Authority("example.com".into()),
+                Tlv::UniqueId(b"0123456789"[..].into()),
+            ],
+        );
+
+        let mut ret = Vec::new();
+
+        let mut buf = Vec::new();
+        v4.encode_v1(&mut buf).unwrap();
+        ret.push(("v1", v4.clone(), buf));
+
+        let mut buf = Vec::new();
+        ProxyHeader::with_local().encode_v1(&mut buf).unwrap();
+        ret.push(("v1 local", ProxyHeader::with_local(), buf));
+
+        let mut buf = Vec::new();
+        v4.encode_v2(&mut buf).unwrap();
+        ret.push(("v2", v4, buf));
+
+        let mut buf = Vec::new();
+        ProxyHeader::with_local().encode_v2(&mut buf).unwrap();
+        ret.push(("v2 local", ProxyHeader::with_local(), buf));
+
+        let mut buf = Vec::new();
+        v2_tlvs.encode_v2(&mut buf).unwrap();
+        ret.push(("v2 with TLVs", v2_tlvs, buf));
+
+        for (_, _, buf) in ret.iter_mut() {
+            buf.extend_from_slice(&payload());
+        }
+
+        ret
+    }
+
+    /// A reader that returns at most one byte per read call.
+    struct Trickle<R>(R);
+
+    impl<R: Read> Read for Trickle<R> {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            let len = buf.len().min(1);
+            self.0.read(&mut buf[..len])
+        }
+    }
+
+    /// Drains a `BufRead` through `fill_buf` / `consume`, consuming at most `step` bytes at a time.
+    fn drain_buf_read(mut r: impl BufRead, step: usize) -> Vec<u8> {
+        let mut out = Vec::new();
+        loop {
+            let buf = r.fill_buf().unwrap();
+            if buf.is_empty() {
+                return out;
+            }
+            let n = buf.len().min(step);
+            out.extend_from_slice(&buf[..n]);
+            r.consume(n);
+        }
+    }
 
     #[test]
     fn test_sync() {
@@ -461,35 +544,316 @@ mod tests {
         assert!(buf.into_iter().all(|b| b == 255));
     }
 
+    #[test]
+    fn test_sync_read() {
+        for (name, header, data) in cases() {
+            for read_size in [1, 7, 100, 8192] {
+                let mut proxied =
+                    ProxiedStream::create_from_std(Cursor::new(&data), Default::default()).unwrap();
+                assert_eq!(proxied.proxy_header(), &header, "{name}");
+
+                let mut out = Vec::new();
+                let mut buf = vec![0; read_size];
+                loop {
+                    let n = proxied.read(&mut buf).unwrap();
+                    if n == 0 {
+                        break;
+                    }
+                    out.extend_from_slice(&buf[..n]);
+                }
+                assert_eq!(out, payload(), "{name}, read size {read_size}");
+            }
+        }
+    }
+
+    #[test]
+    fn test_sync_trickle() {
+        // Header arrives one byte at a time, so parsing has to retry on BufferTooShort
+        // and nothing past the header may be over-read.
+        for (name, header, data) in cases() {
+            let mut proxied =
+                ProxiedStream::create_from_std(Trickle(Cursor::new(&data)), Default::default())
+                    .unwrap();
+            assert_eq!(proxied.proxy_header(), &header, "{name}");
+
+            let mut out = Vec::new();
+            proxied.read_to_end(&mut out).unwrap();
+            assert_eq!(out, payload(), "{name}");
+        }
+    }
+
+    #[test]
+    fn test_sync_buf_read() {
+        for (name, header, data) in cases() {
+            for capacity in [16, 300, 8192] {
+                for step in [1, 13, usize::MAX] {
+                    let inner = io::BufReader::with_capacity(capacity, Cursor::new(&data));
+                    let proxied =
+                        ProxiedStream::create_from_std(inner, Default::default()).unwrap();
+                    assert_eq!(proxied.proxy_header(), &header, "{name}");
+
+                    assert_eq!(
+                        drain_buf_read(proxied, step),
+                        payload(),
+                        "{name}, capacity {capacity}, step {step}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_sync_mixed_read_and_buf_read() {
+        for (name, _, data) in cases() {
+            let inner = io::BufReader::new(Cursor::new(&data));
+            let mut proxied = ProxiedStream::create_from_std(inner, Default::default()).unwrap();
+
+            let mut out = vec![0; 5];
+            proxied.read_exact(&mut out).unwrap();
+
+            let buf = proxied.fill_buf().unwrap();
+            let n = buf.len().min(3);
+            out.extend_from_slice(&buf[..n]);
+            proxied.consume(n);
+
+            proxied.read_to_end(&mut out).unwrap();
+            assert_eq!(out, payload(), "{name}");
+        }
+    }
+
+    #[test]
+    fn test_sync_errors() {
+        let err =
+            ProxiedStream::create_from_std(Cursor::new(b"PROXY TCP4 1.2."), Default::default())
+                .unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof);
+
+        let err = ProxiedStream::create_from_std(Cursor::new(b""), Default::default()).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof);
+
+        let err = ProxiedStream::create_from_std(
+            Cursor::new(b"GET / HTTP/1.1\r\nHost: example.com\r\n\r\n"),
+            Default::default(),
+        )
+        .unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+
+        let err = ProxiedStream::create_from_std(
+            Cursor::new(b"PROXY TCP4 1.2.3.4 5.6.7.8 1 2\r\n"),
+            ParseConfig {
+                allow_v1: false,
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn test_sync_unproxied() {
+        let data = payload();
+        let mut proxied = ProxiedStream::unproxied(io::BufReader::new(Cursor::new(&data)));
+        assert_eq!(proxied.proxy_header(), &ProxyHeader::with_local());
+
+        let mut out = Vec::new();
+        proxied.read_to_end(&mut out).unwrap();
+        assert_eq!(out, data);
+
+        let proxied = ProxiedStream::unproxied(io::BufReader::new(Cursor::new(&data)));
+        assert_eq!(drain_buf_read(proxied, 17), data);
+    }
+
+    #[test]
+    fn test_sync_write_passthrough() {
+        let mut proxied = ProxiedStream::unproxied(Vec::new());
+        proxied.write_all(b"hello ").unwrap();
+        write!(proxied, "{}", 42).unwrap();
+        proxied.flush().unwrap();
+        assert_eq!(proxied.into_inner(), b"hello 42");
+    }
+
     #[cfg(feature = "tokio")]
-    #[tokio::test]
-    async fn test_tokio() {
-        use tokio::io::AsyncReadExt;
+    mod tokio_tests {
+        use super::*;
+        use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 
-        let mut buf = [0; 1024];
+        /// Drains an `AsyncBufRead` through `fill_buf` / `consume`, consuming at most
+        /// `step` bytes at a time.
+        async fn drain_async_buf_read(mut r: impl AsyncBufRead + Unpin, step: usize) -> Vec<u8> {
+            let mut out = Vec::new();
+            loop {
+                let buf = r.fill_buf().await.unwrap();
+                if buf.is_empty() {
+                    return out;
+                }
+                let n = buf.len().min(step);
+                out.extend_from_slice(&buf[..n]);
+                Pin::new(&mut r).consume(n);
+            }
+        }
 
-        let header = ProxyHeader::with_address(ProxiedAddress {
-            protocol: Protocol::Stream,
-            source: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 1234)),
-            destination: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(8, 8, 4, 4), 5678)),
-        });
+        #[tokio::test]
+        async fn test_tokio() {
+            let mut buf = [0; 1024];
 
-        let written_len = header.encode_to_slice_v2(&mut buf).unwrap();
-        buf[written_len..].fill(255);
+            let header = ProxyHeader::with_address(ProxiedAddress {
+                protocol: Protocol::Stream,
+                source: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 1234)),
+                destination: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(8, 8, 4, 4), 5678)),
+            });
 
-        let mut stream = Cursor::new(&buf);
+            let written_len = header.encode_to_slice_v2(&mut buf).unwrap();
+            buf[written_len..].fill(255);
 
-        let mut proxied = ProxiedStream::create_from_tokio(&mut stream, Default::default())
+            let mut stream = Cursor::new(&buf);
+
+            let mut proxied = ProxiedStream::create_from_tokio(&mut stream, Default::default())
+                .await
+                .unwrap();
+            assert_eq!(proxied.proxy_header(), &header);
+
+            let mut buf = Vec::new();
+            AsyncReadExt::read_to_end(&mut proxied, &mut buf)
+                .await
+                .unwrap();
+
+            assert_eq!(buf.len(), 1024 - written_len);
+            assert!(buf.into_iter().all(|b| b == 255));
+        }
+
+        #[tokio::test]
+        async fn test_tokio_read() {
+            for (name, header, data) in cases() {
+                for read_size in [1, 7, 100, 8192] {
+                    let mut proxied =
+                        ProxiedStream::create_from_tokio(Cursor::new(&data), Default::default())
+                            .await
+                            .unwrap();
+                    assert_eq!(proxied.proxy_header(), &header, "{name}");
+
+                    let mut out = Vec::new();
+                    let mut buf = vec![0; read_size];
+                    loop {
+                        let n = AsyncReadExt::read(&mut proxied, &mut buf).await.unwrap();
+                        if n == 0 {
+                            break;
+                        }
+                        out.extend_from_slice(&buf[..n]);
+                    }
+                    assert_eq!(out, payload(), "{name}, read size {read_size}");
+                }
+            }
+        }
+
+        #[tokio::test]
+        async fn test_tokio_trickle() {
+            // A duplex pipe with a 1 byte buffer delivers the header one byte at a time.
+            for (name, header, data) in cases() {
+                let (mut tx, rx) = tokio::io::duplex(1);
+                let writer = tokio::spawn(async move {
+                    tx.write_all(&data).await.unwrap();
+                });
+
+                let mut proxied = ProxiedStream::create_from_tokio(rx, Default::default())
+                    .await
+                    .unwrap();
+                assert_eq!(proxied.proxy_header(), &header, "{name}");
+
+                let mut out = Vec::new();
+                AsyncReadExt::read_to_end(&mut proxied, &mut out)
+                    .await
+                    .unwrap();
+                assert_eq!(out, payload(), "{name}");
+
+                writer.await.unwrap();
+            }
+        }
+
+        #[tokio::test]
+        async fn test_tokio_buf_read() {
+            // Regression test: consuming the bytes that were over-read along with the header
+            // used to consume the same amount from the inner reader as well, losing data.
+            for (name, header, data) in cases() {
+                for capacity in [16, 300, 8192] {
+                    for step in [1, 13, usize::MAX] {
+                        let inner = BufReader::with_capacity(capacity, Cursor::new(data.clone()));
+                        let proxied = ProxiedStream::create_from_tokio(inner, Default::default())
+                            .await
+                            .unwrap();
+                        assert_eq!(proxied.proxy_header(), &header, "{name}");
+
+                        assert_eq!(
+                            drain_async_buf_read(proxied, step).await,
+                            payload(),
+                            "{name}, capacity {capacity}, step {step}"
+                        );
+                    }
+                }
+            }
+        }
+
+        #[tokio::test]
+        async fn test_tokio_mixed_read_and_buf_read() {
+            for (name, _, data) in cases() {
+                let inner = BufReader::new(Cursor::new(data));
+                let mut proxied = ProxiedStream::create_from_tokio(inner, Default::default())
+                    .await
+                    .unwrap();
+
+                let mut out = vec![0; 5];
+                AsyncReadExt::read_exact(&mut proxied, &mut out)
+                    .await
+                    .unwrap();
+
+                let buf = proxied.fill_buf().await.unwrap();
+                let n = buf.len().min(3);
+                out.extend_from_slice(&buf[..n]);
+                Pin::new(&mut proxied).consume(n);
+
+                AsyncReadExt::read_to_end(&mut proxied, &mut out)
+                    .await
+                    .unwrap();
+                assert_eq!(out, payload(), "{name}");
+            }
+        }
+
+        #[tokio::test]
+        async fn test_tokio_errors() {
+            let err = ProxiedStream::create_from_tokio(
+                Cursor::new(b"PROXY TCP4 1.2."),
+                Default::default(),
+            )
             .await
-            .unwrap();
-        assert_eq!(proxied.proxy_header(), &header);
+            .unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof);
 
-        let mut buf = Vec::new();
-        AsyncReadExt::read_to_end(&mut proxied, &mut buf)
+            let err = ProxiedStream::create_from_tokio(
+                Cursor::new(b"GET / HTTP/1.1\r\nHost: example.com\r\n\r\n"),
+                Default::default(),
+            )
             .await
-            .unwrap();
+            .unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        }
 
-        assert_eq!(buf.len(), 1024 - written_len);
-        assert!(buf.into_iter().all(|b| b == 255));
+        #[tokio::test]
+        async fn test_tokio_unproxied() {
+            let data = payload();
+            let proxied = ProxiedStream::unproxied(BufReader::new(Cursor::new(data.clone())));
+            assert_eq!(proxied.proxy_header(), &ProxyHeader::with_local());
+            assert_eq!(drain_async_buf_read(proxied, 17).await, data);
+        }
+
+        #[tokio::test]
+        async fn test_tokio_write_passthrough() {
+            let (a, mut b) = tokio::io::duplex(64);
+            let mut proxied = ProxiedStream::unproxied(a);
+            proxied.write_all(b"hello world").await.unwrap();
+            proxied.shutdown().await.unwrap();
+
+            let mut out = Vec::new();
+            b.read_to_end(&mut out).await.unwrap();
+            assert_eq!(out, b"hello world");
+        }
     }
 }
