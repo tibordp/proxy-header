@@ -46,7 +46,7 @@ fn parse_addrs<T: AddressFamily>(
 /// Decode a version 2 PROXY header from a buffer.
 ///
 /// Returns the decoded header and the number of bytes consumed from the buffer.
-pub fn decode(buf: &[u8], config: ParseConfig) -> Result<(ProxyHeader, usize), Error> {
+pub fn decode(buf: &[u8], config: ParseConfig) -> Result<(ProxyHeader<'_>, usize), Error> {
     let mut pos = 0;
 
     if buf.len() < 4 + GREETING.len() {

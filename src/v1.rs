@@ -54,7 +54,7 @@ fn parse_addrs<T: AddressFamily>(buf: &[u8], pos: &mut usize) -> Result<ProxiedA
     })
 }
 
-fn decode_inner(buf: &[u8]) -> Result<(ProxyHeader, usize), Error> {
+fn decode_inner(buf: &[u8]) -> Result<(ProxyHeader<'_>, usize), Error> {
     let mut pos = 0;
 
     if buf.len() < b"PROXY UNKNOWN\r\n".len() {
@@ -96,7 +96,7 @@ fn decode_inner(buf: &[u8]) -> Result<(ProxyHeader, usize), Error> {
 /// Decode a version 1 PROXY header from a buffer.
 ///
 /// Returns the decoded header and the number of bytes consumed from the buffer.
-pub fn decode(buf: &[u8]) -> Result<(ProxyHeader, usize), Error> {
+pub fn decode(buf: &[u8]) -> Result<(ProxyHeader<'_>, usize), Error> {
     // Guard against a malicious client sending a very long header, since it is a
     // delimited protocol.
 

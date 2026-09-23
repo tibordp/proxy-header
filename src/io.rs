@@ -12,6 +12,7 @@
 //! ## Example (Tokio)
 //!
 //! ```no_run
+//! # #[cfg(feature = "tokio")]
 //! # #[tokio::main] async fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! use tokio::io::{AsyncReadExt, AsyncWriteExt};
 //! use tokio::net::TcpListener;
@@ -30,7 +31,7 @@
 //!         // We can now inspect the address
 //!         println!("proxy header: {:?}", socket.proxy_header());
 //!
-//!         /// Then process the protocol
+//!         // Then process the protocol
 //!         let mut buf = vec![0; 1024];
 //!         loop {
 //!             let n = socket.read(&mut buf).await.unwrap();
@@ -42,11 +43,10 @@
 //!     });
 //! }
 //! # }
+//! # #[cfg(not(feature = "tokio"))]
+//! # fn main() {}
 //! ```
-use std::{
-    io::{self, BufRead, Read, Write},
-    mem::MaybeUninit,
-};
+use std::io::{self, BufRead, Read, Write};
 
 #[cfg(any(unix, target_os = "wasi"))]
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, RawFd};
@@ -65,8 +65,11 @@ use tokio::io::{AsyncBufRead, AsyncRead, AsyncWrite, ReadBuf};
 
 use crate::{Error, ParseConfig, ProxyHeader};
 
-#[cfg(all(feature = "tokio", not(doc)))]
+#[cfg(feature = "tokio")]
 pin_project! {
+    /// Wrapper around a stream that starts with a proxy header.
+    ///
+    /// See [module level documentation](`crate::io`)
     #[derive(Debug)]
     pub struct ProxiedStream<IO> {
         #[pin]
@@ -79,7 +82,7 @@ pin_project! {
 /// Wrapper around a stream that starts with a proxy header.
 ///
 /// See [module level documentation](`crate::io`)
-#[cfg(any(doc, not(feature = "tokio")))]
+#[cfg(not(feature = "tokio"))]
 #[derive(Debug)]
 pub struct ProxiedStream<IO> {
     io: IO,
@@ -101,7 +104,7 @@ impl<IO> ProxiedStream<IO> {
     }
 
     /// Get the proxy header.
-    pub fn proxy_header(&self) -> &ProxyHeader {
+    pub fn proxy_header(&self) -> &ProxyHeader<'_> {
         &self.header
     }
 
@@ -200,28 +203,19 @@ where
                 bytes.reserve(32);
             }
 
-            // TODO: Get rid of this once read-buf is stabilized
-            // (https://github.com/rust-lang/rust/issues/78485)
+            // Read into the zero-initialized spare capacity, then trim to what was read.
+            let filled = bytes.len();
+            bytes.resize(bytes.capacity(), 0);
 
-            let buf = bytes.spare_capacity_mut();
-            buf.fill(MaybeUninit::new(0));
+            let bytes_read = io.read(&mut bytes[filled..])?;
+            assert!(filled + bytes_read <= bytes.len());
+            bytes.truncate(filled + bytes_read);
 
-            // SAFETY: We just initialized the whole spare capacity
-            let buf: &mut [u8] = unsafe { std::mem::transmute(buf) };
-
-            let bytes_read = io.read(buf)?;
             if bytes_read == 0 {
                 return Err(io::Error::new(
                     io::ErrorKind::UnexpectedEof,
                     "end of stream",
                 ));
-            }
-
-            // SAFETY: The bytes are initialized even if the reader lies about how many
-            // bytes were read.
-            unsafe {
-                assert!(bytes_read <= buf.len());
-                bytes.set_len(bytes.len() + bytes_read);
             }
 
             match ProxyHeader::parse(&bytes, config) {

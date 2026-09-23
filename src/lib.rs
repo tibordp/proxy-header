@@ -320,10 +320,10 @@ pub enum Tlv<'a> {
     /// - initialize the checksum field to '0's.
     ///
     /// - calculate the CRC32c checksum of the PROXY header as described in RFC4960,
-    /// Appendix B.
+    ///   Appendix B.
     ///
     /// - put the resultant value into the checksum field, and leave the rest of
-    /// the bits unchanged.
+    ///   the bits unchanged.
     ///
     /// If the checksum is provided as part of the PROXY header and the checksum
     /// functionality is supported by the receiver, the receiver MUST:
@@ -331,11 +331,11 @@ pub enum Tlv<'a> {
     /// - store the received CRC32c checksum value aside.
     ///
     /// - replace the 32 bits of the checksum field in the received PROXY header with
-    /// all '0's and calculate a CRC32c checksum value of the whole PROXY header.
+    ///   all '0's and calculate a CRC32c checksum value of the whole PROXY header.
     ///
     /// - verify that the calculated CRC32c checksum is the same as the received
-    /// CRC32c checksum. If it is not, the receiver MUST treat the TCP connection
-    /// providing the header as invalid.
+    ///   CRC32c checksum. If it is not, the receiver MUST treat the TCP connection
+    ///   providing the header as invalid.
     ///
     /// The default procedure for handling an invalid TCP connection is to abort it.
     Crc32c(u32),
@@ -809,10 +809,7 @@ mod tests {
                 ));
             }
 
-            assert!(matches!(
-                ProxyHeader::parse(case, Default::default()),
-                Ok(_)
-            ));
+            assert!(ProxyHeader::parse(case, Default::default()).is_ok());
         }
     }
 
